@@ -244,13 +244,8 @@ void CPosixNetworkManager::RestoreSavedConnection()
     {
       if (!((CPosixConnection*)m_connections[i].get())->Connect(NULL, saved_ipconfig))
       {
-        wait(20);
-        if (!((CPosixConnection*)m_connections[i].get())->Connect(NULL, saved_ipconfig))
-        {
-          // best we can do is try an existing system connection
-          RestoreSystemConnection();
-        }
-        break;
+        // best we can do is try an existing system connection
+        RestoreSystemConnection();
       }
       break;
     }
