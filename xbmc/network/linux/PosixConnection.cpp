@@ -704,7 +704,7 @@ bool CPosixConnection::DoConnection(const CIPConfig &ipconfig, std::string passp
   // wait for wap to connect to the AP and udhcp to fetch an IP
   if (m_type == NETWORK_CONNECTION_TYPE_WIFI)
   {
-    for (int i = 0; i < 60; ++i)
+    for (int i = 0; i < 120; ++i)
     {
       if (GetState() == NETWORK_CONNECTION_STATE_CONNECTED)
         break;
