@@ -46,11 +46,13 @@ CDVDVideoCodecAmlogic::CDVDVideoCodecAmlogic() :
   m_framerate(0.0),
   m_video_rate(0)
 {
+  pthread_mutex_init(&m_queue_mutex, NULL);
 }
 
 CDVDVideoCodecAmlogic::~CDVDVideoCodecAmlogic()
 {
   Dispose();
+  pthread_mutex_destroy(&m_queue_mutex);
 }
 
 bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &options)
@@ -125,19 +127,22 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
   m_videobuffer.iWidth  = hints.width;
   m_videobuffer.iHeight = hints.height;
 
+  m_videobuffer.iDisplayWidth  = m_videobuffer.iWidth;
   m_videobuffer.iDisplayHeight = m_videobuffer.iHeight;
-  m_videobuffer.iDisplayWidth  = ((int)lrint(m_videobuffer.iHeight * hints.aspect)) & -3;
-  if (m_videobuffer.iDisplayWidth > m_videobuffer.iWidth)
+  if (hints.aspect > 0.0 && !hints.forced_aspect)
   {
-    m_videobuffer.iDisplayWidth  = m_videobuffer.iWidth;
-    m_videobuffer.iDisplayHeight = ((int)lrint(m_videobuffer.iWidth / hints.aspect)) & -3;
+    m_videobuffer.iDisplayWidth  = ((int)lrint(m_videobuffer.iHeight * hints.aspect)) & -3;
+    if (m_videobuffer.iDisplayWidth > m_videobuffer.iWidth)
+    {
+      m_videobuffer.iDisplayWidth  = m_videobuffer.iWidth;
+      m_videobuffer.iDisplayHeight = ((int)lrint(m_videobuffer.iWidth / hints.aspect)) & -3;
+    }
   }
 
   CJobManager::GetInstance().Pause(kJobTypeMediaFlags);
   if (CJobManager::GetInstance().IsProcessing(kJobTypeMediaFlags) > 0)
   {
     int timeout_ms = 5000;
-    // use m_bStop and Sleep so we can get canceled.
     while (timeout_ms > 0)
     {
       if (CJobManager::GetInstance().IsProcessing(kJobTypeMediaFlags) > 0)
@@ -157,14 +162,12 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
 void CDVDVideoCodecAmlogic::Dispose(void)
 {
   if (m_Codec)
-  {
-    m_Codec->CloseDecoder();
-    m_Codec = NULL;
-  }
-  if (m_videobuffer.iFlags & DVP_FLAG_ALLOCATED)
-  {
+    m_Codec->CloseDecoder(), m_Codec = NULL;
+  if (m_videobuffer.iFlags)
     m_videobuffer.iFlags = 0;
-  }
+  while (m_queue_depth)
+    PtsQueuePop();
+
   // let thumbgen jobs resume.
   CJobManager::GetInstance().UnPause(kJobTypeMediaFlags);
 }
@@ -200,7 +203,8 @@ void CDVDVideoCodecAmlogic::Reset(void)
 
 bool CDVDVideoCodecAmlogic::GetPicture(DVDVideoPicture* pDvdVideoPicture)
 {
-  m_Codec->GetPicture(&m_videobuffer);
+  if (m_Codec)
+    m_Codec->GetPicture(&m_videobuffer);
   *pDvdVideoPicture = m_videobuffer;
 
   return true;
@@ -212,17 +216,24 @@ void CDVDVideoCodecAmlogic::SetDropState(bool bDrop)
 
 void CDVDVideoCodecAmlogic::SetSpeed(int iSpeed)
 {
-  m_Codec->SetSpeed(iSpeed);
+  if (m_Codec)
+    m_Codec->SetSpeed(iSpeed);
 }
 
 int CDVDVideoCodecAmlogic::GetDataSize(void)
 {
-  return m_Codec->GetDataSize();
+  if (m_Codec)
+    return m_Codec->GetDataSize();
+  else
+    return 0;
 }
 
 double CDVDVideoCodecAmlogic::GetTimeSize(void)
 {
-  return m_Codec->GetTimeSize();
+  if (m_Codec)
+    return m_Codec->GetTimeSize();
+  else
+    return 0;
 }
 
 void CDVDVideoCodecAmlogic::PtsQueuePop(void)
@@ -230,10 +241,12 @@ void CDVDVideoCodecAmlogic::PtsQueuePop(void)
   if (!m_pts_queue || m_queue_depth == 0)
     return;
 
+  pthread_mutex_lock(&m_queue_mutex);
   // pop the top frame off the queue
   pts_queue *top_pts = m_pts_queue;
   m_pts_queue = top_pts->nextpts;
   m_queue_depth--;
+  pthread_mutex_unlock(&m_queue_mutex);
 
   // and release it
   free(top_pts);
@@ -253,6 +266,8 @@ void CDVDVideoCodecAmlogic::PtsQueuePush(double dts, double pts)
     else
       newpts->sort_time = newpts->pts;
   }
+
+  pthread_mutex_lock(&m_queue_mutex);
   pts_queue *queueWalker = m_pts_queue;
   if (!queueWalker || (newpts->sort_time < queueWalker->sort_time))
   {
@@ -278,6 +293,7 @@ void CDVDVideoCodecAmlogic::PtsQueuePush(double dts, double pts)
     }
   }
   m_queue_depth++;
+  pthread_mutex_unlock(&m_queue_mutex);	
 }
 
 void CDVDVideoCodecAmlogic::FrameRateTracking(double dts, double pts)
@@ -288,11 +304,13 @@ void CDVDVideoCodecAmlogic::FrameRateTracking(double dts, double pts)
   // so make sure we wait for at least 16 values in sorted queue.
   if (m_queue_depth > 16)
   {
-    float cur_pts;
-    if (m_pts_queue->pts == DVD_NOPTS_VALUE)
+    pthread_mutex_lock(&m_queue_mutex);
+
+    float cur_pts = m_pts_queue->pts;
+    if (cur_pts == DVD_NOPTS_VALUE)
       cur_pts = m_pts_queue->dts;
-    else
-      cur_pts = m_pts_queue->pts;
+
+    pthread_mutex_unlock(&m_queue_mutex);	
 
     float duration = cur_pts - m_last_pts;
     m_last_pts = cur_pts;
